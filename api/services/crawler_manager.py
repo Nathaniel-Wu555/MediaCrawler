@@ -224,6 +224,8 @@ class CrawlerManager:
 
         cmd.extend(["--get_comment", "true" if config.enable_comments else "false"])
         cmd.extend(["--get_sub_comment", "true" if config.enable_sub_comments else "false"])
+        cmd.extend(["--enable_report", "true" if config.enable_report else "false"])
+        cmd.extend(["--report_only", "true" if config.report_only else "false"])
 
         if config.cookies:
             cmd.extend(["--cookies", config.cookies])

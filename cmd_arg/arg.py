@@ -291,6 +291,24 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="Storage Configuration",
             ),
         ] = config.SAVE_DATA_PATH,
+        enable_report: Annotated[
+            str,
+            typer.Option(
+                "--enable_report",
+                help="Whether to generate a report after crawling, supports yes/true/t/y/1 or no/false/f/n/0",
+                rich_help_panel="Report Configuration",
+                show_default=True,
+            ),
+        ] = str(config.ENABLE_REPORT_GENERATION),
+        report_only: Annotated[
+            str,
+            typer.Option(
+                "--report_only",
+                help="Only generate report from existing data and skip crawling",
+                rich_help_panel="Report Configuration",
+                show_default=True,
+            ),
+        ] = str(config.REPORT_ONLY),
         enable_ip_proxy: Annotated[
             str,
             typer.Option(
@@ -344,6 +362,8 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES = max_comments_count_singlenotes
         config.MAX_CONCURRENCY_NUM = max_concurrency_num
         config.SAVE_DATA_PATH = save_data_path
+        config.ENABLE_REPORT_GENERATION = _to_bool(enable_report)
+        config.REPORT_ONLY = _to_bool(report_only)
         config.ENABLE_IP_PROXY = enable_ip_proxy_value
         config.IP_PROXY_POOL_COUNT = ip_proxy_pool_count
         config.IP_PROXY_PROVIDER_NAME = ip_proxy_provider_name

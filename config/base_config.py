@@ -116,6 +116,13 @@ ENABLE_GET_SUB_COMMENTS = False
 # word cloud related
 # Whether to enable generating comment word clouds
 ENABLE_GET_WORDCLOUD = False
+
+# Whether to generate a summary report from the crawled data after crawling
+ENABLE_REPORT_GENERATION = False
+
+# Whether to skip crawling and only generate a report from existing stored data
+REPORT_ONLY = False
+
 # Custom words and their groups
 # Add rule: xx:yy where xx is a custom-added phrase, and yy is the group name to which the phrase xx is assigned.
 CUSTOM_WORDS = {

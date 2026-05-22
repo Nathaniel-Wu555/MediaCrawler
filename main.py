@@ -44,6 +44,7 @@ from media_platform.weibo import WeiboCrawler
 from media_platform.xhs import XiaoHongShuCrawler
 from media_platform.zhihu import ZhihuCrawler
 from tools.async_file_writer import AsyncFileWriter
+from tools.report_generator import generate_report
 from var import crawler_type_var
 
 
@@ -106,14 +107,34 @@ async def main() -> None:
         print(f"Database {args.init_db} initialized successfully.")
         return
 
+    if config.REPORT_ONLY:
+        print("[Main] Report-only mode enabled. Skipping crawling and generating report from existing data...")
+        generate_report(platform=config.PLATFORM)
+        return
+
     crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
-    await crawler.start()
+    crawl_error: Optional[BaseException] = None
+    try:
+        await crawler.start()
+    except Exception as error:
+        crawl_error = error
+        print(f"[Main] Crawler failed: {error}")
 
     _flush_excel_if_needed()
+
+    if config.ENABLE_REPORT_GENERATION or config.REPORT_ONLY:
+        print("[Main] Generating report from available data...")
+        try:
+            generate_report(platform=config.PLATFORM)
+        except Exception as error:
+            print(f"[Main] Error generating report: {error}")
 
     # Generate wordcloud after crawling is complete
     # Only for JSON save mode
     await _generate_wordcloud_if_needed()
+
+    if crawl_error:
+        raise crawl_error
 
 
 async def async_cleanup() -> None:
