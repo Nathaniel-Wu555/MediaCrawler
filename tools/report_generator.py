@@ -40,9 +40,11 @@ try:
 except ImportError:
     YTDLP_AVAILABLE = False
 
-AI_BASE_URL = os.getenv("OPENAI_BASE_URL") or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1"
-AI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-AI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", "deepseek-vision")
+# DeepSeek API 配置（直接硬编码）
+AI_API_KEY = "sk-c63ccef16b4446eea900ee6b42d1820a"  # 注意：硬编码 API Key，生产请改为环境变量
+AI_BASE_URL = "https://api.deepseek.com/v1"
+AI_MODEL = "deepseek-chat"
+AI_VISION_MODEL = "deepseek-vision"
 REPORT_AI_SCORE_THRESHOLD = float(os.getenv("REPORT_AI_SCORE_THRESHOLD", "5.0"))
 REPORT_ENABLE_AI_SCORE = os.getenv("REPORT_ENABLE_AI_SCORE", "true").lower() in {"true", "1", "yes"}
 REPORT_ENABLE_CONTENT_ENRICH = os.getenv("REPORT_ENABLE_CONTENT_ENRICH", "true").lower() in {"true", "1", "yes"}
@@ -106,21 +108,18 @@ class MediaCrawlerReportGenerator:
         self.ai_client = self._create_ai_client()
         self._whisper_model = None
 
-    def _create_ai_client(self) -> Optional[Any]:
+    def _create_ai_client(self) -> Any:
+        """创建 DeepSeek AI 客户端（强制使用 AI 模式）"""
         if not OPENAI_AVAILABLE:
-            logger.warning("OpenAI is not installed. Report generation will use fallback summaries.")
-            return None
+            raise ImportError("OpenAI SDK is not installed. Please install the openai package.")
 
-        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-        if not api_key:
-            logger.warning("OPENAI_API_KEY / DEEPSEEK_API_KEY is not set. Using fallback summaries.")
-            return None
+        if not AI_API_KEY:
+            raise ValueError("AI API key is not configured. Please set AI_API_KEY in the source or environment.")
 
         try:
-            return OpenAI(api_key=api_key, base_url=AI_BASE_URL)
+            return OpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
         except Exception as exc:
-            logger.warning(f"Failed to initialize OpenAI client: {exc}")
-            return None
+            raise RuntimeError(f"Failed to initialize AI client: {exc}")
 
     def _get_whisper_model(self):
         if not WHISPER_AVAILABLE:
@@ -266,9 +265,8 @@ class MediaCrawlerReportGenerator:
     def filter_comments(self, comments_df: pd.DataFrame) -> pd.DataFrame:
         if comments_df.empty:
             return comments_df
-        cleaned = comments_df[~comments_df["content"].astype(str).apply(self._is_useless_comment)].copy()
-        logger.info(f"Filtered comments: {len(comments_df)} -> {len(cleaned)}")
-        return cleaned
+        # 删除评论筛选：保留原始评论用于AI分析
+        return comments_df
 
     def normalize_url(self, url: str) -> str:
         if not url:
@@ -312,28 +310,55 @@ class MediaCrawlerReportGenerator:
         most_common = Counter(words).most_common(top_n)
         return [word for word, _ in most_common]
 
-    def _build_fallback_summary(self, title: str, desc: str, comments: List[str]) -> Dict[str, str]:
-        summary = str(desc).strip()
-        if not summary:
-            summary = str(title).strip()
-        if len(summary) > 180:
-            summary = summary[:180].rstrip() + "..."
-        top_comments = [c for c in comments if c]
-        keyword_text = ", ".join(self._extract_keywords(top_comments, top_n=5))
-        analysis = f"共计{len(top_comments)}条有效评论，关键词：{keyword_text or '无明显关键词'}。"
-        return {
-            "summary": summary,
-            "comment_analysis": analysis,
-            "ai_score": "0",
-            "tags": "",
-            "media_insights": "",
-        }
+    # 已删除：_estimate_comment_attitude 和 _build_fallback_summary
+    # 降级逻辑已移除，所有分析均通过 AI 完成
+
+    def _extract_json_object(self, text: str) -> Optional[Dict[str, Any]]:
+        if not text:
+            return None
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        start = text.find("{")
+        if start < 0:
+            return None
+
+        depth = 0
+        for index in range(start, len(text)):
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:index + 1]
+                    try:
+                        return json.loads(candidate)
+                    except Exception:
+                        break
+        return None
+
+    def _extract_ai_score(self, value: Any) -> float:
+        if value is None:
+            return 0.0
+        text = str(value)
+        match = re.search(r"(\d+(?:\.\d+)?)", text)
+        if match:
+            try:
+                return float(match.group(1))
+            except Exception:
+                return 0.0
+        return 0.0
 
     def _build_ai_prompt(self, title: str, desc: str, comments: List[str], extra_notes: str = "") -> str:
         comment_text = chr(10).join(comments[:REPORT_MAX_COMMENT_PREVIEW])
         prompt = (
-            f"请对以下内容进行分析，并严格返回 JSON 格式结果，字段包括 summary、comment_analysis、ai_score、tags、media_insights。"
-            f" summary 80-140字；comment_analysis 100-150字；ai_score 0-10 的数字；tags 3-5个关键词；media_insights 50-80字，补充图文/视频内容洞察。\n"
+            f"请综合标题和内容生成摘要，并分析评论区观点与整体倾向，严格返回 JSON 格式结果，字段包括 summary、comment_analysis、ai_score、tags、media_insights。"
+            f" summary 80-140字，comment_analysis 100-150字，说明评论区主要观点、支持/反对态度、支持比例和总体倾向；"
+            f"ai_score 0-10 的数字；tags 3-5个关键词；media_insights 40-80字，补充图文内容洞察。\n"
             f"标题：{title}\n"
             f"内容：{desc}\n"
             f"评论：{comment_text}\n"
@@ -343,36 +368,39 @@ class MediaCrawlerReportGenerator:
         return prompt
 
     def _call_ai_analysis(self, title: str, desc: str, comments: List[str], extra_notes: str = "") -> Dict[str, str]:
-        if not self.ai_client:
-            result = self._build_fallback_summary(title, desc, comments)
-            result["media_insights"] = extra_notes
-            return result
-
+        """调用 DeepSeek AI 进行分析（强制使用 AI，无本地降级）。"""
         prompt = self._build_ai_prompt(title, desc, comments, extra_notes)
-        try:
-            response = self.ai_client.chat.completions.create(
-                model=AI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=800,
-            )
-            text = response.choices[0].message.content.strip()
-            data = json.loads(text)
-            tags = data.get("tags", "")
-            if isinstance(tags, list):
-                tags = ", ".join(str(item) for item in tags)
-            return {
-                "summary": str(data.get("summary", "") or "").strip(),
-                "comment_analysis": str(data.get("comment_analysis", "") or "").strip(),
-                "ai_score": str(data.get("ai_score", "0")).strip(),
-                "tags": str(tags),
-                "media_insights": str(data.get("media_insights", "") or "").strip(),
-            }
-        except Exception as exc:
-            logger.warning(f"AI analysis failed, fallback used: {exc}")
-            result = self._build_fallback_summary(title, desc, comments)
-            result["media_insights"] = extra_notes
-            return result
+
+        response = self.ai_client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=1000,
+        )
+
+        text = response.choices[0].message.content.strip()
+        data = self._extract_json_object(text) or {}
+
+        tags = data.get("tags", data.get("keywords", ""))
+        if isinstance(tags, list):
+            tags = ", ".join(str(item) for item in tags)
+
+        summary = str(data.get("summary", data.get("摘要", "") or "")).strip()
+        comment_analysis = str(
+            data.get("comment_analysis", data.get("commentAnalysis", data.get("评论区分析", ""))) or ""
+        ).strip()
+        ai_score_value = data.get("ai_score", data.get("score", data.get("AI评分", "5")))
+        media_insights = str(
+            data.get("media_insights", data.get("mediaInsights", data.get("媒体洞察", ""))) or ""
+        ).strip()
+
+        return {
+            "summary": summary,
+            "comment_analysis": comment_analysis,
+            "ai_score": str(ai_score_value).strip(),
+            "tags": str(tags),
+            "media_insights": media_insights,
+        }
 
     def _extract_image_urls(self, text: str) -> List[str]:
         if not text:
@@ -427,14 +455,6 @@ class MediaCrawlerReportGenerator:
             notes.append(f"检测到图片链接：{', '.join(image_urls[:3])}。请结合图像内容补充分析。")
         return "\n".join(notes)
 
-    def _build_content_summary(self, row: pd.Series) -> str:
-        raw_desc = str(row.get("desc", "") or "").strip()
-        if not raw_desc:
-            return str(row.get("title", "") or "").strip()
-        if len(raw_desc) > 220:
-            return raw_desc[:220].rstrip() + "..."
-        return raw_desc
-
     def _build_report_row(self, row: pd.Series, note_comments: List[str]) -> Dict[str, Any]:
         extra_notes = self._analyze_media_notes(row)
         ai_result = self._call_ai_analysis(
@@ -444,7 +464,7 @@ class MediaCrawlerReportGenerator:
             extra_notes=extra_notes,
         )
         try:
-            score_value = float(ai_result.get("ai_score", "0"))
+            score_value = float(self._extract_ai_score(ai_result.get("ai_score", "0")))
         except (TypeError, ValueError):
             score_value = 0.0
 
@@ -452,11 +472,10 @@ class MediaCrawlerReportGenerator:
             "标题": row.get("title", ""),
             "原文链接": row.get("note_url", ""),
             "原文": row.get("desc", ""),
-            "内容摘要": self._build_content_summary(row),
+            "摘要": ai_result.get("summary", ""),
             "作者": row.get("nickname", ""),
             "评论数": len(note_comments),
             "AI评分": round(score_value, 2),
-            "AI摘要": ai_result.get("summary", ""),
             "评论区分析": ai_result.get("comment_analysis", ""),
             "AI标签": ai_result.get("tags", ""),
             "媒体洞察": ai_result.get("media_insights", ""),
@@ -505,14 +524,11 @@ class MediaCrawlerReportGenerator:
             lines.append(f"作者：{row.get('作者', '')}")
             lines.append(f"链接：{row.get('原文链接', '')}")
             lines.append("")
-            lines.append("### 内容摘要")
-            lines.append(row.get('内容摘要', '') or "")
+            lines.append("### 摘要")
+            lines.append(row.get('摘要', '') or "")
             lines.append("")
             lines.append("### 原文")
             lines.append(row.get('原文', '') or "")
-            lines.append("")
-            lines.append("### AI 摘要")
-            lines.append(row.get('AI摘要', '') or "")
             lines.append("")
             lines.append("### AI 评分")
             lines.append(str(row.get('AI评分', '')))
@@ -538,10 +554,9 @@ class MediaCrawlerReportGenerator:
                 widths = {
                     "标题": 40,
                     "原文链接": 45,
-                    "内容摘要": 60,
+                    "摘要": 60,
                     "原文": 80,
                     "AI评分": 10,
-                    "AI摘要": 60,
                     "评论区分析": 80,
                     "AI标签": 35,
                     "媒体洞察": 60,
