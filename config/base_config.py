@@ -139,6 +139,12 @@ FONT_PATH = "./docs/STZHONGS.TTF"
 # Crawl interval
 CRAWLER_MAX_SLEEP_SEC = 2
 
+# AI 功能配置
+# 是否启用 AI 图片分析（在报告生成阶段对正文图片进行视觉分析）
+ENABLE_AI_IMAGE_ANALYSIS = False
+# 是否启用视频转文字（启用后会尝试下载视频并使用 Whisper 转写音频）
+ENABLE_VIDEO_TO_TEXT = False
+
 # 是否禁用 SSL 证书验证。仅在使用企业代理、Burp Suite、mitmproxy 等会注入自签名证书的中间人代理时设为 True。
 # 警告：禁用 SSL 验证将使所有流量暴露于中间人攻击风险，请勿在生产环境中开启。
 DISABLE_SSL_VERIFY = False

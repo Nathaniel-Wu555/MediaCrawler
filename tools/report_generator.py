@@ -51,18 +51,22 @@ REPORT_ENABLE_CONTENT_ENRICH = os.getenv("REPORT_ENABLE_CONTENT_ENRICH", "true")
 REPORT_ENABLE_MEDIA_ANALYSIS = os.getenv("REPORT_ENABLE_MEDIA_ANALYSIS", "true").lower() in {"true", "1", "yes"}
 REPORT_ENABLE_SEMANTIC_DEDUP = os.getenv("REPORT_ENABLE_SEMANTIC_DEDUP", "true").lower() in {"true", "1", "yes"}
 REPORT_MAX_COMMENT_PREVIEW = int(os.getenv("REPORT_MAX_COMMENT_PREVIEW", "20"))
+REPORT_ENABLE_AI_IMAGE_ANALYSIS = getattr(config, "ENABLE_AI_IMAGE_ANALYSIS", False)
+REPORT_ENABLE_VIDEO_TO_TEXT = getattr(config, "ENABLE_VIDEO_TO_TEXT", False)
 
 
+# 更新字段别名映射
 CONTENT_FIELD_ALIASES = {
-    "note_id": ["note_id", "content_id", "aweme_id", "post_id", "id"],
+    "note_id": ["note_id", "content_id", "aweme_id", "post_id", "id", "video_id", "aid"],
     "title": ["title", "note_title", "video_title", "content_title", "subject", "name"],
     "desc": ["desc", "content", "text", "description", "note_desc", "detail", "message"],
-    "note_url": ["note_url", "share_url", "url", "article_url", "link", "href"],
+    "note_url": ["note_url", "share_url", "url", "article_url", "link", "href", "bvid", "video_url"],
     "video_url": ["video_url", "video_play_url", "video_link", "play_url"],
-    "nickname": ["nickname", "user_name", "author", "creator", "screen_name"],
+    "nickname": ["nickname", "user_name", "author", "creator", "screen_name", "name"],
     "ip_location": ["ip_location", "location"],
     "type": ["type", "content_type", "video_type"],
 }
+
 
 COMMENT_FIELD_ALIASES = {
     "comment_id": ["comment_id", "id", "reply_id"],
@@ -131,11 +135,19 @@ class MediaCrawlerReportGenerator:
                 logger.warning(f"Unable to load Whisper model: {exc}")
                 self._whisper_model = None
         return self._whisper_model
-
     def _get_data_base_path(self, platform: str) -> pathlib.Path:
+        # 平台别名映射：命令行平台值转为实际存储目录名
+        platform_mapping = {
+            "dy": "douyin",  # 抖音：命令行参数是 dy，文件夹名是 douyin
+            "ks": "kuaishou",  # 快手：命令行参数是 ks，文件夹名是 kuaishou
+            "wb": "weibo",    # 微博：命令行参数是 wb，文件夹名是 weibo
+        }
+        
+        folder_name = platform_mapping.get(platform, platform)
+        
         if config.SAVE_DATA_PATH:
-            return pathlib.Path(config.SAVE_DATA_PATH) / platform
-        return pathlib.Path("data") / platform
+            return pathlib.Path(config.SAVE_DATA_PATH) / folder_name
+        return pathlib.Path("data") / folder_name
 
     def _find_data_files(self, item_type: str) -> List[pathlib.Path]:
         patterns = [f"{self.base_path}/**/*_{item_type}_*{ext}" for ext in [".csv", ".jsonl", ".json", ".xlsx", ".xls"]]
@@ -214,32 +226,109 @@ class MediaCrawlerReportGenerator:
         return normalized
 
     def _normalize_content(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        return self._normalize_record(record, CONTENT_FIELD_ALIASES)
+        normalized = self._normalize_record(record, CONTENT_FIELD_ALIASES)
+        # 修复 B 站存储的 bvid（如 BVxxxx）为完整 URL
+        try:
+            if self.platform == "bili":
+                note_url = normalized.get("note_url")
+                if note_url and note_url.startswith("BV"):
+                    normalized["note_url"] = f"https://www.bilibili.com/video/{note_url}"
+        except Exception:
+            pass
+        return normalized
 
     def _normalize_comment(self, record: Dict[str, Any]) -> Dict[str, Any]:
         return self._normalize_record(record, COMMENT_FIELD_ALIASES)
 
     def _load_records(self, item_type: str) -> List[Dict[str, Any]]:
         files = self._find_data_files(item_type)
+        logger.info(f"[DEBUG] _load_records: item_type={item_type}, platform={self.platform}, base_path={self.base_path}, found {len(files)} files")
+        for i, f in enumerate(files):
+            logger.info(f"[DEBUG]   File {i + 1}: {f}")
+
         items: List[Dict[str, Any]] = []
         for path in files:
-            items.extend(self._load_file(path))
+            loaded = self._load_file(path)
+            logger.info(f"[DEBUG]   Loaded {len(loaded)} records from {path}")
+            items.extend(loaded)
+
+        if items:
+            logger.info(f"[DEBUG] First record keys: {list(items[0].keys())}")
+            if len(items) > 1:
+                logger.info(f"[DEBUG] Total records loaded: {len(items)}")
+        else:
+            logger.warning(f"[DEBUG] No records loaded for {item_type}")
+
         return items
 
     def load_contents(self) -> pd.DataFrame:
+        logger.info(f"[DEBUG] load_contents: platform={self.platform}, base_path={self.base_path}")
         records = [self._normalize_content(item) for item in self._load_records("contents")]
+        if records:
+            logger.info(f"[DEBUG] Normalized records count: {len(records)}")
+            logger.info(f"[DEBUG] Normalized record keys: {list(records[0].keys())}")
+        else:
+            logger.warning(f"[DEBUG] No normalized records")
+
         df = pd.DataFrame(records)
+        logger.info(f"[DEBUG] DataFrame shape: {df.shape}")
+        logger.info(f"[DEBUG] DataFrame columns: {list(df.columns) if not df.empty else 'Empty'}")
+
         if df.empty:
+            logger.warning(f"[DEBUG] DataFrame is empty, returning early")
             return df
-        df["note_id"] = df["note_id"].astype(str).fillna("")
+
+        if "note_id" not in df.columns:
+            logger.error(f"[DEBUG] ERROR: 'note_id' column NOT found in DataFrame!")
+            logger.error(f"[DEBUG] Available columns: {list(df.columns)}")
+            possible_ids = ["aweme_id", "video_id", "id", "content_id", "post_id", "aid"]
+            found_ids = [col for col in possible_ids if col in df.columns]
+            logger.info(f"[DEBUG] Possible ID columns found: {found_ids}")
+            if found_ids:
+                logger.info(f"[DEBUG] Using '{found_ids[0]}' as note_id")
+                df["note_id"] = df[found_ids[0]].astype(str).fillna("")
+            else:
+                logger.error(f"[DEBUG] No ID column found! Creating empty note_id")
+                df["note_id"] = ""
+        else:
+            logger.info(f"[DEBUG] 'note_id' column found, proceeding normally")
+            df["note_id"] = df["note_id"].astype(str).fillna("")
+
         return df
 
     def load_comments(self) -> pd.DataFrame:
+        logger.info(f"[DEBUG] load_comments: platform={self.platform}, base_path={self.base_path}")
         records = [self._normalize_comment(item) for item in self._load_records("comments")]
+        if records:
+            logger.info(f"[DEBUG] Normalized comment records count: {len(records)}")
+            logger.info(f"[DEBUG] Normalized comment record keys: {list(records[0].keys())}")
+        else:
+            logger.warning(f"[DEBUG] No normalized comment records")
+
         df = pd.DataFrame(records)
+        logger.info(f"[DEBUG] Comment DataFrame shape: {df.shape}")
+        logger.info(f"[DEBUG] Comment DataFrame columns: {list(df.columns) if not df.empty else 'Empty'}")
+
         if df.empty:
+            logger.warning(f"[DEBUG] Comments DataFrame is empty, returning early")
             return df
-        df["note_id"] = df["note_id"].astype(str).fillna("")
+
+        if "note_id" not in df.columns:
+            logger.error(f"[DEBUG] ERROR: 'note_id' column NOT found in comments DataFrame!")
+            logger.error(f"[DEBUG] Available comment columns: {list(df.columns)}")
+            possible_ids = ["aweme_id", "video_id", "id", "content_id", "post_id", "aid", "target_id"]
+            found_ids = [col for col in possible_ids if col in df.columns]
+            logger.info(f"[DEBUG] Possible comment ID columns found: {found_ids}")
+            if found_ids:
+                logger.info(f"[DEBUG] Using '{found_ids[0]}' as note_id for comments")
+                df["note_id"] = df[found_ids[0]].astype(str).fillna("")
+            else:
+                logger.error(f"[DEBUG] No comment ID column found! Creating empty note_id")
+                df["note_id"] = ""
+        else:
+            logger.info(f"[DEBUG] 'note_id' column found in comments, proceeding normally")
+            df["note_id"] = df["note_id"].astype(str).fillna("")
+
         return df
 
     def _is_useless_comment(self, comment: str) -> bool:
@@ -445,15 +534,85 @@ class MediaCrawlerReportGenerator:
             return ""
 
     def _analyze_media_notes(self, row: Dict[str, Any]) -> str:
+        notes = []
         if not REPORT_ENABLE_MEDIA_ANALYSIS:
             return ""
 
         desc = str(row.get("desc", ""))
         image_urls = self._extract_image_urls(desc)
-        notes = []
         if image_urls:
-            notes.append(f"检测到图片链接：{', '.join(image_urls[:3])}。请结合图像内容补充分析。")
+            notes.append(f"检测到图片链接：{', '.join(image_urls[:3])}。")
+            if REPORT_ENABLE_AI_IMAGE_ANALYSIS and image_urls:
+                try:
+                    # 仅分析首张图片以节省调用量
+                    img_analysis = self._analyze_image_with_ai(image_urls[0])
+                    if img_analysis:
+                        notes.append(f"图像分析：{img_analysis}")
+                except Exception as exc:
+                    logger.warning(f"Image analysis failed: {exc}")
+
+        # 视频转文字（若启用，则加入转写内容作为额外笔记）
+        if REPORT_ENABLE_VIDEO_TO_TEXT:
+            try:
+                video_text = self._process_video_content(row)
+                if video_text:
+                    notes.append("视频转写：" + (video_text[:400] + '...' if len(video_text) > 400 else video_text))
+            except Exception as exc:
+                logger.warning(f"Video processing failed: {exc}")
+
         return "\n".join(notes)
+
+    def _analyze_image_with_ai(self, image_url: str) -> str:
+        """调用视觉模型对单张图片做简短描述性分析，返回简短文本。"""
+        if not REPORT_ENABLE_AI_IMAGE_ANALYSIS:
+            return ""
+        try:
+            if not hasattr(self, "ai_client") or self.ai_client is None:
+                return ""
+            prompt = f"请对以下图片给出40-80字的视觉洞察，侧重场景、主体、情绪和可能的传播点：{image_url}"
+            response = self.ai_client.chat.completions.create(
+                model=AI_VISION_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=300,
+            )
+            text = ""
+            try:
+                text = response.choices[0].message.content.strip()
+            except Exception:
+                text = str(response)
+            return text
+        except Exception as exc:
+            logger.warning(f"_analyze_image_with_ai error: {exc}")
+            return ""
+
+    def _process_video_content(self, row: Dict[str, Any]) -> str:
+        """尝试下载视频音频并使用 Whisper 转写，返回转写文本。"""
+        if not REPORT_ENABLE_VIDEO_TO_TEXT:
+            return ""
+        desc = str(row.get("desc", ""))
+        video_urls = self._extract_video_urls(desc)
+        if not video_urls:
+            # 有时视频链接存在 video_url 字段
+            candidate = row.get("video_url") or row.get("video_play_url")
+            if candidate:
+                video_urls = [candidate]
+        if not video_urls:
+            return ""
+
+        video_url = video_urls[0]
+        audio_path = self._download_video_audio(video_url)
+        if not audio_path:
+            return ""
+        try:
+            transcript = self._transcribe_audio(audio_path)
+            return transcript or ""
+        finally:
+            try:
+                if audio_path and audio_path.exists():
+                    audio_path.unlink()
+            except Exception:
+                pass
 
     def _build_report_row(self, row: pd.Series, note_comments: List[str]) -> Dict[str, Any]:
         extra_notes = self._analyze_media_notes(row)
@@ -474,7 +633,6 @@ class MediaCrawlerReportGenerator:
             "原文": row.get("desc", ""),
             "摘要": ai_result.get("summary", ""),
             "作者": row.get("nickname", ""),
-            "评论数": len(note_comments),
             "AI评分": round(score_value, 2),
             "评论区分析": ai_result.get("comment_analysis", ""),
             "AI标签": ai_result.get("tags", ""),
@@ -488,12 +646,45 @@ class MediaCrawlerReportGenerator:
             logger.warning(f"No contents found for platform '{self.platform}'. Report generation aborted.")
             return
 
+        if "note_id" not in contents.columns:
+            logger.error(f"[DEBUG] ERROR: 'note_id' column not found in contents DataFrame before filtering.")
+            logger.error(f"[DEBUG] Available content columns: {list(contents.columns)}")
+            possible_ids = ["aweme_id", "video_id", "id", "content_id", "post_id", "aid"]
+            found_ids = [col for col in possible_ids if col in contents.columns]
+            logger.info(f"[DEBUG] Possible content ID columns found: {found_ids}")
+            if found_ids:
+                contents["note_id"] = contents[found_ids[0]].astype(str).fillna("")
+                logger.info(f"[DEBUG] Using '{found_ids[0]}' as note_id for contents.")
+            else:
+                logger.error("[DEBUG] No content ID column could be mapped to note_id. Aborting report generation.")
+                return
+
         contents = contents[contents["note_id"] != ""].copy()
+        if contents.empty:
+            logger.warning("No valid contents with non-empty note_id found.")
+            return
+
+        if not comments.empty and "note_id" not in comments.columns:
+            logger.error(f"[DEBUG] ERROR: 'note_id' column not found in comments DataFrame.")
+            logger.error(f"[DEBUG] Available comment columns: {list(comments.columns)}")
+            possible_ids = ["aweme_id", "video_id", "id", "content_id", "post_id", "aid", "target_id"]
+            found_ids = [col for col in possible_ids if col in comments.columns]
+            logger.info(f"[DEBUG] Possible comment ID columns found: {found_ids}")
+            if found_ids:
+                comments["note_id"] = comments[found_ids[0]].astype(str).fillna("")
+                logger.info(f"[DEBUG] Using '{found_ids[0]}' as note_id for comments.")
+            else:
+                logger.warning("[DEBUG] Cannot map comment ID column to note_id. Comments will not be joined by note_id.")
 
         report_records: List[Dict[str, Any]] = []
         for _, row in contents.iterrows():
             note_id = str(row.get("note_id", ""))
-            note_comments = comments[comments["note_id"] == note_id]["content"].astype(str).tolist()
+            note_comments: List[str] = []
+            if not comments.empty and "note_id" in comments.columns:
+                note_comments = comments[comments["note_id"] == note_id]["content"].astype(str).tolist()
+            else:
+                logger.debug(f"[DEBUG] Skipping comment lookup for note_id={note_id} because comments DataFrame has no note_id column or is empty.")
+
             row_record = self._build_report_row(row, note_comments)
             report_records.append(row_record)
 
@@ -503,14 +694,22 @@ class MediaCrawlerReportGenerator:
 
         report_df = pd.DataFrame(report_records)
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
-        md_path = self.report_dir / f"{self.platform}_report_{now}.md"
-        excel_path = self.report_dir / f"{self.platform}_report_{now}.xlsx"
 
-        self._write_markdown(report_df, md_path)
-        self._write_excel(report_df, excel_path)
+        # 写出两个 Excel：基础信息与 AI 分析结果（分表）
+        excel_basic_path = self.report_dir / f"{self.platform}_report_basic_{now}.xlsx"
+        excel_ai_path = self.report_dir / f"{self.platform}_report_ai_{now}.xlsx"
+
+        basic_cols = ["标题", "原文链接", "原文", "作者"]
+        ai_cols = ["标题", "摘要", "AI评分", "评论区分析", "AI标签", "媒体洞察"]
+
+        basic_df = report_df[[c for c in basic_cols if c in report_df.columns]]
+        ai_df = report_df[[c for c in ai_cols if c in report_df.columns]]
+
+        self._write_excel(basic_df, excel_basic_path)
+        self._write_excel(ai_df, excel_ai_path)
         self._write_json(report_records, self.report_dir / f"{self.platform}_report_{now}.json")
-        logger.info(f"Report generated: {md_path}")
-        logger.info(f"Excel generated: {excel_path}")
+        logger.info(f"Excel (basic) generated: {excel_basic_path}")
+        logger.info(f"Excel (AI) generated: {excel_ai_path}")
 
     def _write_markdown(self, df: pd.DataFrame, path: pathlib.Path) -> None:
         lines = [

@@ -309,6 +309,24 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 show_default=True,
             ),
         ] = str(config.REPORT_ONLY),
+        ai_image_analysis: Annotated[
+            str,
+            typer.Option(
+                "--ai_image_analysis",
+                help="Whether to enable AI image analysis (yes/true/1)",
+                rich_help_panel="AI Configuration",
+                show_default=True,
+            ),
+        ] = str(config.ENABLE_AI_IMAGE_ANALYSIS),
+        video_to_text: Annotated[
+            str,
+            typer.Option(
+                "--video_to_text",
+                help="Whether to enable video->text transcription (yes/true/1)",
+                rich_help_panel="AI Configuration",
+                show_default=True,
+            ),
+        ] = str(config.ENABLE_VIDEO_TO_TEXT),
         enable_ip_proxy: Annotated[
             str,
             typer.Option(
@@ -364,6 +382,9 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.SAVE_DATA_PATH = save_data_path
         config.ENABLE_REPORT_GENERATION = _to_bool(enable_report)
         config.REPORT_ONLY = _to_bool(report_only)
+        # AI feature flags
+        config.ENABLE_AI_IMAGE_ANALYSIS = _to_bool(ai_image_analysis)
+        config.ENABLE_VIDEO_TO_TEXT = _to_bool(video_to_text)
         config.ENABLE_IP_PROXY = enable_ip_proxy_value
         config.IP_PROXY_POOL_COUNT = ip_proxy_pool_count
         config.IP_PROXY_PROVIDER_NAME = ip_proxy_provider_name
