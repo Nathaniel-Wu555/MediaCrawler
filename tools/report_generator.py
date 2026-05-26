@@ -58,11 +58,11 @@ REPORT_ENABLE_VIDEO_TO_TEXT = getattr(config, "ENABLE_VIDEO_TO_TEXT", False)
 # 更新字段别名映射
 CONTENT_FIELD_ALIASES = {
     "note_id": ["note_id", "content_id", "aweme_id", "post_id", "id", "video_id", "aid"],
-    "title": ["title", "note_title", "video_title", "content_title", "subject", "name"],
-    "desc": ["desc", "content", "text", "description", "note_desc", "detail", "message"],
-    "note_url": ["note_url", "share_url", "url", "article_url", "link", "href", "bvid", "video_url"],
+    "title": ["title", "note_title", "video_title", "content_title", "subject", "name", "question"],
+    "desc": ["desc", "content", "text", "description", "note_desc", "detail", "message", "content_text"],
+    "note_url": ["note_url", "share_url", "url", "article_url", "link", "href", "bvid", "video_url", "aweme_url", "content_url", "short_url", "post_url"],
     "video_url": ["video_url", "video_play_url", "video_link", "play_url"],
-    "nickname": ["nickname", "user_name", "author", "creator", "screen_name", "name"],
+    "nickname": ["nickname", "user_name", "author", "creator", "screen_name", "name", "user_nickname"],
     "ip_location": ["ip_location", "location"],
     "type": ["type", "content_type", "video_type"],
 }
@@ -227,7 +227,8 @@ class MediaCrawlerReportGenerator:
 
     def _normalize_content(self, record: Dict[str, Any]) -> Dict[str, Any]:
         normalized = self._normalize_record(record, CONTENT_FIELD_ALIASES)
-        # 修复 B 站存储的 bvid（如 BVxxxx）为完整 URL
+
+        # B站：转换 BV 号为完整 URL
         try:
             if self.platform == "bili":
                 note_url = normalized.get("note_url")
@@ -235,7 +236,35 @@ class MediaCrawlerReportGenerator:
                     normalized["note_url"] = f"https://www.bilibili.com/video/{note_url}"
         except Exception:
             pass
+
+        # 微博：如果缺少标题，则使用 AI 生成一个简洁标题
+        if self.platform in {"wb", "weibo"}:
+            if not normalized.get("title"):
+                content = record.get("content") or record.get("desc") or record.get("text") or ""
+                if content:
+                    normalized["title"] = self._generate_title_by_ai(content)
+
+        # 知乎：补充 title 可能来自 question 字段
+        if self.platform == "zhihu" and not normalized.get("title"):
+            normalized["title"] = record.get("title") or record.get("question") or ""
+
         return normalized
+
+    def _generate_title_by_ai(self, content: str) -> str:
+        """使用AI为内容生成简洁的标题。"""
+        content = str(content)[:500]
+        prompt = f"请为以下内容生成一个简洁的中文标题（不超过20字）：\n{content}"
+        response = self.ai_client.chat.completions.create(
+            model=AI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=50,
+        )
+        title = response.choices[0].message.content.strip()
+        title = title.strip('"').strip("'")
+        if len(title) > 30:
+            title = title[:30]
+        return title
 
     def _normalize_comment(self, record: Dict[str, Any]) -> Dict[str, Any]:
         return self._normalize_record(record, COMMENT_FIELD_ALIASES)

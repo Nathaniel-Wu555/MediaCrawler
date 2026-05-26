@@ -24,6 +24,7 @@ from typing import Optional, List
 from datetime import datetime
 from pathlib import Path
 
+from tools.utils import logger
 from ..schemas import CrawlerStartRequest, LogEntry
 
 
