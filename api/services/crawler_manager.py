@@ -67,7 +67,26 @@ class CrawlerManager:
         self._logs.append(entry)
         # Keep last 500 logs
         if len(self._logs) > 500:
-            self._logs = self._logs[-500:]
+            logger.info("Log count reached 500, clearing all logs")
+            
+            # 创建清空消息
+            clear_entry = LogEntry(
+                id=-1,  # 使用 -1 表示清空消息
+                timestamp=datetime.now().strftime("%H:%M:%S"),
+                level="info",
+                message="__CLEAR_LOGS__"
+            )
+            
+            # 先发送清空消息到队列
+            if self._log_queue is not None:
+                try:
+                    self._log_queue.put_nowait(clear_entry)
+                except asyncio.QueueFull:
+                    pass
+            
+            # 清空日志
+            self._logs = []
+            self._log_id = 0
         return entry
 
     async def _push_log(self, entry: LogEntry):
